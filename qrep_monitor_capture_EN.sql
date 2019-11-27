@@ -38,7 +38,9 @@
 --                subs are TEMP_DEACTIVATED = 'Y' via join with
 --                ASNCLP_Q_BASE. If all inactive subs have
 --                TEMP_DEACTIVATED = 'Y' the severity of message C-SUB
---                is INFO instead of WARNING
+--                is INFO instead of WARNING (only applicable when 
+--                being used in conjunction with the Q Rep Subscription 
+--                Generator
 -- ---------------------------------------------------------------------
 
 -- change before execution ---------------------------------------------
