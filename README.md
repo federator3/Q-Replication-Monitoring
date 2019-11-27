@@ -1,13 +1,15 @@
 # Q-Replication-Monitoring
 
 This repository contains SQL scripts to 
+
 a) monitor IBM Q Replication runtime processes 
     qrep_monitor_capture_EN.sql
     qrep_monitor_apply_EN.sql
+    
 b) validate a Q Replication setup
     qrep_check_qsubs_capture_EN.sql
     qrep_check_qsubs_apply_EN.sql
-    
+        
 How to run the scripts:
 
 #> db2 connect to <capture_server>
