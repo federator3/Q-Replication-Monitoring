@@ -3,6 +3,7 @@
 -- Q Capture Monitor
 -- Report zum schnellen Aufspüren von Unterbrechungen und
 -- Ausnahmebedingungen bei der Q Replication. Queries:
+--   100: C-OPE - Capture operational
 --   110: C-LAT - Capture latency
 --   130: C-SQU - Send Queue status
 --   140: C-SUB - Inactive / new subscriptions
@@ -41,6 +42,10 @@
 --                is INFO instead of WARNING (only applicable when 
 --                being used in conjunction with the Q Rep Subscription 
 --                Generator
+--  - 03.12.2020: Added A-OPE Operational State 
+--  - 09.12.2020: new algorithm to calculate the capture latency
+--  - 10.12.2020: Message C-SUB (Q140): now issued for all queues, even
+--                for those with no subscription
 -- ---------------------------------------------------------------------
 
 -- change before execution ---------------------------------------------
@@ -77,12 +82,67 @@ from
 -- ---------------------------------------------------------------------
 -- Q CAPTURE -----------------------------------------------------------
 
+-- ---------------------------------------------------------------------
+-- Query 100:
 
--- Query 110:
 --    DE: Komponente: Q Capture
---    Ausschnitt: Capture Process
+--    Ausschnitt: Capture operationaler Status
+--    EN: Component: Q Capture
+--    Section: Capture operational state
+
+select 
+
+100 as ordercol,
+'ASNQCAP(' concat trim(current schema) concat ')' as program,
+current server as CURRENT_SERVER,
+'C-OPE' as MTYP, 
+
+case when y.MONITOR_TIME < 
+       y.EXPECTED_TS_LAST_MONITOR_RECORD - 5 seconds
+	 then 'ERROR'
+	 else 'INFO'
+end as SEV,
+
+case when y.MONITOR_TIME <
+       y.EXPECTED_TS_LAST_MONITOR_RECORD - 5 seconds
+-- DE
+       then 'Q Capture nicht in Betrieb oder gestoert seit '
+          concat trim(VARCHAR(y.MONITOR_TIME)) concat '.'
+-- EN
+--     then 'Q Capture down or not operational since '
+--        concat trim(VARCHAR(y.MONITOR_TIME)) concat '.'
+-- DE
+     else 'Q Capture in Betrieb '
+-- EN
+--   else 'Q Capture operational '
+end as MTXT
+
+from 
+
+(
+
+select 
+cm.monitor_time,
+current timestamp - (dec(cp.monitor_interval) / 1000) seconds 
+  AS EXPECTED_TS_LAST_MONITOR_RECORD
+
+from ibmqrep_capmon cm,
+     ibmqrep_capparms cp
+
+-- only the most current rows 
+where cm.monitor_time = (select max(monitor_time) 
+                         from ibmqrep_capmon)	
+
+) y
+
+UNION
+
+-- ---------------------------------------------------------------------
+-- Query 110:
+--    DE: Komponente: Q Captuure
+--    Ausschnitt: Capture Latency
 --    EM: Component: Q Capture
---    Section: Capture Process
+--    Section: Capture Latency
 
 select
 110 as ordercol,
@@ -90,27 +150,18 @@ select
 current server as CURRENT_SERVER,
 'C-LAT' as MTYP,
 
-case when y.MONITOR_TIME <
-       y.EXPECTED_TS_LAST_MONITOR_RECORD - 5 seconds
+case when y.CAPTURE_LATENCY_SEC > 600
      then 'ERROR'
-     when y.CAPTURE_LATENCY_SEC > 15
+     when y.CAPTURE_LATENCY_SEC > 30
      then 'WARNING'
      else 'INFO'
 end as SEV,
-case when y.MONITOR_TIME <
-       y.EXPECTED_TS_LAST_MONITOR_RECORD - 5 seconds
-
+case when y.CAPTURE_LATENCY_SEC > 600
 -- DE
-       then 'Q Capture nicht in Betrieb oder gestoert seit '
-          concat trim(VARCHAR(y.MONITOR_TIME)) concat '.'
-     when y.CAPTURE_LATENCY_SEC > 15
-     then 'Q Capture Latenz > 15 Sekunden. CAPTURE_LATENCY='
+     then 'Q Capture Latenz > 600 Sekunden. CAPTURE_LATENCY='
 
 -- EN
---     then 'Q Capture not running / interrupted since '
---        concat trim(VARCHAR(y.MONITOR_TIME)) concat '.'
---   when y.CAPTURE_LATENCY_SEC > 15
---   then 'Q Capture latency > 15 seconds. CAPTURE_LATENCY='
+--   then 'Q Capture latency > 600 seconds. CAPTURE_LATENCY='
 
           concat trim(VARCHAR(y.CAPTURE_LATENCY_SEC))
           concat ' s, MEMORY:'
@@ -120,8 +171,27 @@ case when y.MONITOR_TIME <
           concat ' MB, TRANS_SPILLED='
           concat trim(VARCHAR(y.TRANS_SPILLED)) concat '.'
 
-     else 'Q Capture ok (Cature Latency < 15s). CAPTURE_LATENCY='
-          concat
+     when y.CAPTURE_LATENCY_SEC > 30
+-- DE
+     then 'Q Capture Latenz > 30 Sekunden. CAPTURE_LATENCY='
+
+-- EN
+--   then 'Q Capture latency > 30 seconds. CAPTURE_LATENCY='
+
+          concat trim(VARCHAR(y.CAPTURE_LATENCY_SEC))
+          concat ' s, MEMORY:'
+          concat trim(VARCHAR(y.CURRENT_MEMORY_MB))
+          concat '/'
+          concat varchar(y.memory_limit)
+          concat ' MB, TRANS_SPILLED='
+          concat trim(VARCHAR(y.TRANS_SPILLED)) concat '.'
+
+-- DE		  
+     else 'Q Capture Latenz ok (Cature Latency < 30s). '
+-- EN
+--     else 'Q Capture latency ok (Cature Latency < 30s). '
+	 
+          concat 'CAPTURE_LATENCY=' concat
           case when y.CAPTURE_LATENCY_SEC is null then 'UNKNOWN'
                else trim(VARCHAR(y.CAPTURE_LATENCY_SEC))
           end concat ' s, MEMORY: '
@@ -141,15 +211,47 @@ current timestamp - (dec(monitor_interval) / 1000) seconds
   AS EXPECTED_TS_LAST_MONITOR_RECORD,
 cm.monitor_time,
 cp.monitor_interval,
+
+-- 09.12.2020: new logic to calculate the capture latency using
+-- TIMESTAMPDIFF(2, ...) which calculates the differnce in seconds.
+-- Explicitly, TIMESTAMPDIFF(1, ...) - microseconds - was not used
+-- to prevent overflows. Instead, the difference in microseconds ist
+-- added to the difference in seconds to get a more precise latency
+-- value and preventing overflows. Max. difference without overflow:
+-- 68 years (due to integer limits)
+
 case
- when cm.current_log_time <> '1900-01-01-00.00.00.000000' then
-  dec(dec(microsecond(cm.MONITOR_TIME - cm.CURRENT_LOG_TIME)) / 1000000
-  + SECOND(cm.MONITOR_TIME - cm.CURRENT_LOG_TIME)
-  + ((MINUTE(cm.MONITOR_TIME - cm.CURRENT_LOG_TIME)*60) )
-  + (HOUR(cm.MONITOR_TIME - cm.CURRENT_LOG_TIME)*3600)
-  + ((DAYS(cm.MONITOR_TIME)-DAYS(cm.CURRENT_LOG_TIME))*86400) , 12 , 1)
-else null
-end as CAPTURE_LATENCY_SEC,
+-- a) '1900-01-01-00.00.00.000000'  when log reader is not yet ready
+  when cm.current_log_time = '1900-01-01-00.00.00.000000'
+    then NULL
+  when microsecond(cm.MONITOR_TIME) >= microsecond(cm.current_log_time)
+-- difference in seconds plus difference in microseconds (1 digit only)
+    then TIMESTAMPDIFF(2, CHAR(cm.MONITOR_TIME - cm.current_log_time))
+            + dec((dec(microsecond(cm.MONITOR_TIME)
+                - microsecond(cm.current_log_time)) / 1000000) , 2 , 1)
+-- b) microsecond(cm.MONITOR_TIME) < microsecond(cm.current_log_time)
+-- difference in microseconds (1 digit only) negative in this case.
+-- Therefore, the negative value is added to the difference in seconds
+-- plus 1
+  else TIMESTAMPDIFF(2, CHAR(cm.MONITOR_TIME - cm.current_log_time))
+            + 1 + dec((dec(microsecond(cm.MONITOR_TIME)
+                - microsecond(cm.current_log_time)) / 1000000) , 2 , 1)
+end AS CAPTURE_LATENCY_SEC,
+
+-- this logic calculated the wrong difference between the 2 timestamps
+-- when midnight was between the 2 timestamps
+-- case
+--  when cm.current_log_time <> '1900-01-01-00.00.00.000000' then
+--   dec(dec(microsecond(cm.MONITOR_TIME - cm.CURRENT_LOG_TIME)) 
+--               / 1000000
+--   + SECOND(cm.MONITOR_TIME - cm.CURRENT_LOG_TIME)
+--   + ((MINUTE(cm.MONITOR_TIME - cm.CURRENT_LOG_TIME)*60) )
+--   + (HOUR(cm.MONITOR_TIME - cm.CURRENT_LOG_TIME)*3600)
+--   + ((DAYS(cm.MONITOR_TIME) 
+--                   - DAYS(cm.CURRENT_LOG_TIME))*86400) , 12 , 1)
+-- else null
+-- end as CAPTURE_LATENCY_SEC,
+
 dec(dec(cm.CURRENT_MEMORY) / 1024 / 1024, 5 , 0)
   as CURRENT_MEMORY_MB,
 cp.memory_limit,
@@ -287,65 +389,92 @@ UNION
 
 -- Query 140:
 --    DE: Komponente: Q Capture
---    Ausschnitt: Alle inaktiven Subscriptions
+--    Ausschnitt: Subscription Status
 --    DE: Component: Q Capture
---    Section: Alle inaktiven Subscriptions
+--    Section: Subscription state
 
 select
 140 as ordercol,
 'ASNQCAP(' concat trim(current schema) concat ')' as program,
 current server as CURRENT_SERVER,
 'C-SUB' as MTYP,
-case when coalesce(y1.NUM_INACTIVE, 0) = 0 then 'INFO'
+case when coalesce(y2.NUM_INACTIVE, 0) = 0 then 'INFO'
 
 -- Special: only when used with subscription generator
---   when coalesce(y1.NUM_INACTIVE, 0) =
---	      coalesce(y1.NUM_INACTIVE_TEMP_DEACT , 0) then 'INFO'
+--   when coalesce(y2.NUM_INACTIVE, 0) =
+--	      coalesce(y2.NUM_INACTIVE_TEMP_DEACT , 0) then 'INFO'
 -- Special: only when used with subscription generator
 
 	 else 'WARNING'
 end as SEV,
 
 -- DE
-case when (y1.NUM_INACTIVE = 0 or y1.NUM_INACTIVE is null) then
+case when y1.num_subs = 0 then
+        'Keine Subscriptions fuer SENDQ ' concat trim(y1.SENDQ)
+     when (y2.NUM_INACTIVE = 0 or y2.NUM_INACTIVE is null) then
         'Alle relevanten '
-        concat trim(VARCHAR(y2.num_subs))
+        concat trim(VARCHAR(y1.num_subs))
         concat ' Subscriptions fuer SENDQ '
-        concat trim(y2.SENDQ) concat ' aktiv. '
-	 else trim(VARCHAR(y1.NUM_INACTIVE)) concat ' von '
-        concat trim(VARCHAR(y2.num_subs))
+        concat trim(y1.SENDQ) concat ' aktiv. '
+	 else trim(VARCHAR(y2.NUM_INACTIVE)) concat ' von '
+        concat trim(VARCHAR(y1.num_subs))
         concat ' Subscriptions fuer SENDQ '
-        concat trim(y2.SENDQ) concat ' inaktiv.'
+        concat trim(y1.SENDQ) concat ' inaktiv.'
 --      concat ' Davon neu (N): '
 --      concat trim(VARCHAR(coalesce(y3.num_new , 0)))
 --		concat '.'
 
 -- Special: only when used with subscription generator
 --      concat ' Davon TEMP_DEACTIVATED = ''Y'': '
---      concat trim(VARCHAR(coalesce(y1.NUM_INACTIVE_TEMP_DEACT , 0)))
+--      concat trim(VARCHAR(coalesce(y2.NUM_INACTIVE_TEMP_DEACT , 0)))
+-- Special: only when used with subscription generator
+
+
+-- EN
+-- case when y1.num_subs = 0 then
+--        'No subscriptions for SENDQ ' concat trim(y1.SENDQ)
+--      when (y2.NUM_INACTIVE = 0 or y2.NUM_INACTIVE is null) then
+--        'All '
+--        concat trim(VARCHAR(y1.num_subs))
+--        concat ' subscriptions for SENDQ '
+--        concat trim(y1.SENDQ) concat ' active.'
+--      else trim(VARCHAR(y2.NUM_INACTIVE)) concat ' of '
+--        concat trim(VARCHAR(y1.num_subs))
+--        concat ' subscriptions for SENDQ '
+--        concat trim(y1.SENDQ) concat ' inactive.'
+--        -- concat ' Among those new (N): '
+--        -- concat trim(VARCHAR(y3.num_new))
+--		  -- concat '.'
+
+-- Special: only when used with subscription generator
+--        concat ' Among those TEMP_DEACTIVATED = ''Y'': '
+--        concat trim(VARCHAR(coalesce(y2.NUM_INACTIVE_TEMP_DEACT , 0)))
 -- Special: only when used with subscription generator
 
 end as MTXT
 
--- EN
--- case when (y1.NUM_INACTIVE = 0 or y1.NUM_INACTIVE is null) then
---        'All '
---        concat trim(VARCHAR(y2.num_subs))
---        concat ' subscriptions for SENDQ '
---        concat trim(y2.SENDQ) concat ' active.'
---      else trim(VARCHAR(y1.NUM_INACTIVE)) concat ' of '
---        concat trim(VARCHAR(y2.num_subs))
---        concat ' subscriptions for SENDQ '
---        concat trim(y2.SENDQ) concat ' inactive.'
---        -- concat ' Among those new (N): '
---        -- concat trim(VARCHAR(y3.num_new))
--- Special: only when used with subscription generator
---        concat ' Among those TEMP_DEACTIVATED = ''Y'': '
---        concat trim(VARCHAR(coalesce(y1.NUM_INACTIVE_TEMP_DEACT , 0)))
--- Special: only when used with subscription generator
--- end as MTXT
-
 from
+
+(
+
+select q.sendq, coalesce(s.all_subs, 0) AS NUM_SUBS
+from IBMQREP_SENDQUEUES q
+
+left outer join 
+
+(
+
+select sendq, count(*) as all_subs
+from ibmqrep_subs
+group by sendq
+
+)s
+
+on q.sendq = s.sendq
+
+) y1
+
+left outer join
 
 (
 -- Anzahl inaktive Subs
@@ -374,20 +503,13 @@ where su.state <> 'A'
 -- Special: only when used with subscription generator
 
 group by su.sendq
-) y1
 
-right outer join
-
-(
--- Anzahl alle Subs
-select su.sendq, count(*) AS NUM_SUBS
-from ibmqrep_subs su
-group by su.sendq
 ) y2
 
 on y1.sendq = y2.sendq
 
 left outer join
+
 (
 -- Anzahl neuen Subs
 select su.sendq, count(*) AS NUM_NEW
@@ -396,7 +518,7 @@ where su.state = 'N'
 group by su.sendq
 ) y3
 
-on y2.sendq = y3.sendq
+on y1.sendq = y3.sendq
 
 ) x
 
