@@ -3,9 +3,11 @@
 -- Q Apply Monitor (a.k.a. qrep_Ampel_neu_Apply.sql)
 -- Report zum schnellen Aufspüren von Unterbrechungen und 
 -- Ausnahmebedingungen bei der Q Replication. Queries:
---   210: A-LAT - Apply latency
---   230: A-RQU - Receive Queue status
---   235: A-EXC - Number of exceptions within the last 6 hours
+--   200: A-OPE - Apply operational
+--   210: A-RQU - Receive Queue status
+--   220: A-LAT - Apply latency
+--   232: A-CHB - Queue Heartbeat
+--   235: A-EXC - Number of exceptions within the last 24 hours
 --   240: A-SUB - Inactive / new subscriptions
 -- ---------------------------------------------------------------------
 -- Der Report ist am Zielsystem periodisch auszufuehren (z.B. alle 
@@ -40,6 +42,12 @@
 --                SQLCODE. New: INFO if no exceptions, WARNING if 
 --                exceptions.
 --  - 02.04.2019: Exception interval changed from 6 hours t0 24 hours
+--  - 03.12.2020: Added A-OPE Operational State 
+--  - 03.12.2020: Order of A-RQU (now Q210) and A-LAT (now 220) flipped
+--  - 03.12.2020: A-LAT for every queue
+--  - 03.12.2020: A-CHB Heartbeat checking 
+--  - 10.12.2020: Added sqlcode of most recent exception (only within 
+--                5 most recent days) to A-RQU (now Q210)
 -- ---------------------------------------------------------------------
 -- TODO: 
 -- ---------------------------------------------------------------------
@@ -70,24 +78,22 @@ from
 -- ---------------------------------------------------------------------
 -- Q APPLY -------------------------------------------------------------
 
--- Query 210:
+-- Query 200:
 --    DE: Komponente: Q Apply
---    Ausschnitt: Apply Prozess
+--    Ausschnitt: Apply operationaler Status
 --    EN: Component: Q Apply
---    Section: Apply Prozess
+--    Section: Apply operational state
 
 select 
 
-210 as ordercol,
+200 as ordercol,
 'ASNQAPP(' concat trim(current schema) concat ')' as program,
 current server as CURRENT_SERVER,
-'A-LAT' as MTYP, 
+'A-OPE' as MTYP, 
 
 case when y.MONITOR_TIME < 
        y.EXPECTED_TS_LAST_MONITOR_RECORD - 5 seconds
 	 then 'ERROR'
-	 when max(y.end2end_latency_sec) > 15 
-	 then 'WARNING'
 	 else 'INFO'
 end as SEV,
 
@@ -95,31 +101,100 @@ case when y.MONITOR_TIME <
        y.EXPECTED_TS_LAST_MONITOR_RECORD - 5 seconds
 -- DE
 	   then 'Q Apply nicht in Betrieb oder gestoert seit ' 
-	      concat trim(VARCHAR(y.MONITOR_TIME)) concat '.'
-	 when max(y.end2end_latency_sec) > 15 
-	 then 'Q Apply End2End Latenz > 15 Sekunden. END2END_LATENCY=' 
 -- EN
---	   then 'Q Apply not running / interrupted since ' 
---	      concat trim(VARCHAR(y.MONITOR_TIME)) concat '.'
---	 when max(y.end2end_latency_sec) > 15 
---	 then 'Q Apply End2End latency > 15 Sekunden. END2END_LATENCY=' 	 
-	 
-	      concat trim(VARCHAR(max(y.end2end_latency_sec))) 
+--     then 'Q Apply down or not operational since '
+	      concat trim(VARCHAR(y.MONITOR_TIME)) concat '.'
+-- DE
+       else 'Q Apply in Betrieb '
+-- EN
+--     else 'Q Apply operational '
+end as MTXT
+
+from 
+
+(
+
+select 
+am.recvq, 
+am.monitor_time,
+current timestamp - (dec(ap.monitor_interval) / 1000) seconds 
+  AS EXPECTED_TS_LAST_MONITOR_RECORD
+
+from ibmqrep_applymon am,
+     ibmqrep_applyparms ap
+
+-- only the most current rows 
+where am.monitor_time = (select max(monitor_time) 
+                         from ibmqrep_applymon)	
+
+-- only 1 OPE message although there could be multipe APPLYMON rows						 
+-- due to UNION (distinct) and not UNION ALL 
+) y
+
+UNION 
+
+-- Query 220:
+--    DE: Komponente: Q Apply
+--    Ausschnitt: Apply Latency
+--    EN: Component: Q Apply
+--    Section: Apply Latency
+
+select 
+
+220 as ordercol,
+'ASNQAPP(' concat trim(current schema) concat ')' as program,
+current server as CURRENT_SERVER,
+'A-LAT' as MTYP, 
+
+case when y.end2end_latency_sec > 3600
+	 then 'ERROR'
+	 when y.end2end_latency_sec > 300
+	 then 'WARNING'
+	 else 'INFO'
+end as SEV,
+
+case 
+when y.end2end_latency_sec > 3600
+-- DE
+         then 'Q Apply End2End Latenz > 3600 Sekunden fuer '
+-- EN
+--       then 'Q Apply End2End latency > 3600 seconds for '		
+		  concat trim(y.recvq)
+		  concat '. END2END_LATENCY='
+ 	      concat trim(VARCHAR(y.end2end_latency_sec)) 
 		  concat ' s'
 --		  concat ', CURRENT_MEMORY=' 
---		  concat trim(VARCHAR(max(y.current_memory_mb))) 
+--		  concat trim(VARCHAR(y.current_memory_mb)) 
 --		  concat ' MB'
 		  concat ', ROWS_APPLIED=' 
-		  concat trim(VARCHAR(sum(y.rows_applied)))
-	 else 'Q Apply ok (End2End Latency <15s). END2END_LATENCY=' concat 
-	      case when max(y.end2end_latency_sec) is null then 'UNKNOWN'
-               else trim(VARCHAR(max(y.end2end_latency_sec))) 
-		  end concat ' s'
+		  concat trim(VARCHAR(y.rows_applied))		  
+when y.end2end_latency_sec > 300
+-- DE
+         then 'Q Apply End2End Latenz > 300 Sekunden fuer '
+-- EN
+--       then 'Q Apply End2End latency > 300 seconds for '		
+		  concat trim(y.recvq)
+		  concat '. END2END_LATENCY='
+		  concat trim(VARCHAR(y.end2end_latency_sec)) 		 
+		  concat ' s'
 --		  concat ', CURRENT_MEMORY=' 
---		  concat trim(VARCHAR(max(y.current_memory_mb))) 
+--		  concat trim(VARCHAR(y.current_memory_mb)) 
 --		  concat ' MB'
 		  concat ', ROWS_APPLIED=' 
-		  concat trim(VARCHAR(sum(y.rows_applied)))
+		  concat trim(VARCHAR(y.rows_applied))
+-- DE
+  	  else 'Q Apply ok (End2End Latency < 300s) fuer '
+-- EN
+--	  else 'Q Apply ok (End2End Latency < 300s) for '	
+		  concat trim(y.recvq)
+		  concat '. END2END_LATENCY='
+ 	      concat trim(VARCHAR(y.end2end_latency_sec)) 
+		  concat ' s'
+--		  concat ', CURRENT_MEMORY=' 
+--		  concat trim(VARCHAR(y.current_memory_mb)) 
+--		  concat ' MB'
+		  concat ', ROWS_APPLIED=' 
+		  concat trim(VARCHAR(y.rows_applied))
 end as MTXT
 
 
@@ -130,37 +205,30 @@ from
 select 
 am.recvq, 
 am.monitor_time,
-current timestamp - (dec(ap.monitor_interval) / 1000) seconds 
-  AS EXPECTED_TS_LAST_MONITOR_RECORD,
-dec(max(am.end2end_latency) / 1000, 12 , 1) as end2end_latency_sec,
--- dec(sum(am.CURRENT_MEMORY) / 1024 / 1024, 12 , 2) 
--- as CURRENT_MEMORY_MB,
-sum(am.rows_applied) as rows_applied
+dec(am.end2end_latency / 1000, 12 , 1) as end2end_latency_sec,
+am.rows_applied
 
-from ibmqrep_applymon am,
-     ibmqrep_applyparms ap
-
--- only the most current rows 
-where am.monitor_time = (select max(monitor_time) 
-                         from ibmqrep_applymon)	
-group by am.recvq, am.monitor_time, ap.monitor_interval 
---         am.end2end_latency, am.current_memory, am.rows_applied
-
+from ibmqrep_applymon am
+    , (select recvq , 
+              max(monitor_time) as latest_record
+         from ibmqrep_applymon 
+        group by recvq ) as lm
+    
+where am.monitor_time = lm.latest_record
+  and am.recvq = lm.recvq
 ) y
-
-group by y.recvq, y.monitor_time, y.EXPECTED_TS_LAST_MONITOR_RECORD
 
 
 UNION
 
--- Query 230:
+-- Query 210:
 --    DE: Komponente: Q Apply
 --    Ausschnitt: Receive Queue Status
 --    EN: Component: Q Apply
 --    Section: Receive Queue Status
 
 select 
-230 as ordercol,
+210 as ordercol,
 'ASNQAPP(' concat trim(current schema) concat ')' as program,
 current server as CURRENT_SERVER,
 'A-RQU' as MTYP, 
@@ -189,7 +257,16 @@ case when y.state <> 'A'
 		  concat coalesce(trim(varchar(y.current_memory_mb)) 
 		                     , 'UNKNOWN') 
 		  concat '/' concat y.memory_limit concat ' MB'
+-- DE
+		  concat '. Aktuellste Exception der RECVQ: ' 
+-- EN		  
+--		  concat '. Most current exception of the RECVQ: ' 		  
+		  concat coalesce(trim(ex.sqlcode) 
+		                 concat ' (' 
+		                 concat varchar(ex.exception_time)
+						 concat ')', 'UNKNOWN')
 		  concat '.'
+		  
      else 'Receive Queue ' concat trim(y.RECVQ) 
 -- DE
 	      concat ' aktiv'
@@ -227,6 +304,7 @@ ibmqrep_recvqueues rq
 
 left outer join 
 
+-- Most recent monitor data
 (
 
 select mon1.recvq, mon1.monitor_time, 
@@ -254,6 +332,7 @@ on  rq.recvq = moni.recvq
 
 left outer join
 
+-- Number of subscriptions
 (
 
 -- 16.11.2017
@@ -298,6 +377,92 @@ group by s2.recvq
 						 
 on y.recvq = z.recvq
 						 
+left outer join
+
+-- most current exception - only most recent 5 days
+-- added 10.12.2020
+(
+
+select e1.exception_time, e1.recvq, e1.sqlcode
+from ibmqrep_exceptions e1
+inner join
+(select recvq, max(exception_time) as maxex 
+ from ibmqrep_exceptions 
+ where date(exception_time) > current date - 5 days
+ group by recvq) e2
+ on e1.recvq = e2.recvq
+and e1.exception_time = e2.maxex
+
+) ex 
+
+ on y.recvq = ex.recvq						 
+ 
+UNION 
+
+-- Query 232:
+--    DE: Komponente: Q Apply
+--    Ausschnitt: Capture Heartbeat messages
+--    EN: Component: Q Apply
+--    Section: Capture Heartbeat messages
+
+select
+
+232 as ordercol,
+'ASNQAPP(' concat trim(current schema) concat ')' as program,
+current server as CURRENT_SERVER,
+'A-CHB' as MTYP,
+
+case when y.num_heartbeats = 0 then 'WARNING'
+         else 'INFO'
+end as SEV,
+
+case when y.num_heartbeats = 0
+-- DE
+           then '0 Heartbeat Messages fuer Queue '
+              concat trim(y.recvq) concat ' in den letzten 10 '
+              concat 'Minuten. Capture ggf. gestoppt '
+              concat 'oder Send Queue inactiv.'
+-- EN
+--         then '0 Heartbeat messages for queue '
+--            concat trim(y.recvq) concat ' within the last 10 '
+--            concat 'minutes. Capture might be down '
+--            concat 'or send queue is inactive'
+           else trim(y.num_heartbeats) concat ' Heartbeat '
+-- DE
+              concat 'Messages fuer Queue ' concat trim(y.recvq) 
+              concat ' in den letzten 10 Minuten.'
+-- EN
+--            concat 'Messages for Queue ' concat trim(y.recvq) 
+--            concat ' within the recent 10 minutes.'
+end as MTXT
+
+
+from
+
+(
+
+select
+rq.recvq, coalesce(am.num_heartbeats, 0) as num_heartbeats
+from ibmqrep_recvqueues rq
+
+left outer join
+
+(
+
+select recvq, count(*) as num_heartbeats
+
+from ibmqrep_applymon
+
+where monitor_time > current_timestamp -  10 minutes
+  and ( HEARTBEAT_LATENCY > 0
+     or END2END_LATENCY > 0 )
+group by recvq
+
+) am
+
+on rq.recvq = am.recvq
+
+) y
 						 
 UNION
 
@@ -322,34 +487,27 @@ case
   when num_ex = 0 then
 
 -- DE						   
-  'Keine Exceptions in den letzen 24 Stunden.'
+   'Keine Exceptions in den letzen 24 Stunden.'
 
 -- EN
---  'No exceptions in previous 24 hours.'
+-- 'No exceptions in previous 24 hours.'
   
   else
   
--- DE						 
-trim(varchar(num_ex)) concat ' ' concat trim(x.reason)
-concat ' Exceptions fuer '
-concat 'Receive Queue '
-concat trim(recvq) concat ' in den letzten 24 Stunden. ' 
-concat 'Details der letzen Exception: ' 
-concat trim(varchar(x.max_t))
- concat ', SQLCODE ' 
-concat trim(varchar(x.SQLCODE)) concat ', SUBNAME ' 
-concat trim(x.subname) 
-
--- EN						 
--- trim(varchar(num_ex)) concat ' ' concat trim(x.reason)
--- concat ' exceptions for '
--- concat 'receive Queue '
--- concat trim(recvq) concat ' in previous 24 hours. ' 
--- concat 'Details of the most recent exception: ' 
--- concat trim(varchar(x.max_t)) 
--- concat ', SQLCODE ' 
--- concat trim(varchar(x.SQLCODE)) concat ', SUBNAME ' 
--- concat trim(x.subname) 
+    trim(varchar(num_ex)) concat ' ' concat trim(x.reason)
+-- DE
+--  concat ' Exceptions fuer Receive Queue ' concat trim(recvq)
+--  concat ' in den letzten 24 Stunden. ' 
+--  concat 'Details der letzen Exception: ' 
+-- EN
+    concat ' exceptions for receive queue ' concat trim(recvq)
+    concat ' in previous 24 hours. ' 
+    concat 'Details of the last exception: ' 
+	
+    concat trim(varchar(x.max_t))
+    concat ', SQLCODE ' 
+    concat trim(varchar(x.SQLCODE)) concat ', SUBNAME ' 
+    concat trim(x.subname) 
 
 end AS MTXT
 						 
@@ -438,11 +596,12 @@ current server as CURRENT_SERVER,
 'A-SUB' as MTYP, 
 'ERROR' AS SEV,
 
-'Subscription ' concat trim(st.subname) concat ', RECVQ ' 
 -- DE
-concat trim(st.RECVQ) concat ' inaktiv (' 
-concat st.state concat ') seit ' 
+   'Subscription ' concat trim(st.subname) concat ', Recive Queue '
+   concat trim(st.RECVQ) concat ' inaktiv (' 
+   concat st.state concat ') seit ' 
 -- EN
+-- 'Subscription ' concat trim(st.subname) concat ', recive queue '
 -- concat trim(st.RECVQ) concat ' inactive (' 
 -- concat st.state concat ') since ' 
 
