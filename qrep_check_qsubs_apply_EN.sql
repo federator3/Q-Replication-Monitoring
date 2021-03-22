@@ -11,6 +11,7 @@
 --   261: A-RIC - Sub for RI child of a replicated RI parent missing
 --   270: A-BID - Before image column has different data type than
 --                after image column
+--   280: A-BXN - BLOB and XML target column nullability for CCD targets
 -- ---------------------------------------------------------------------
 -- Execute this query at the Q Apply server (e.g., after application
 -- release activities)
@@ -78,6 +79,7 @@
 --                image column NULLABILITY
 --  - 19.04.2018: Query 270 (Before images): FIXIT implemented for
 --                before image errors
+--  - 12.03.2021: New Query 280 - nullability check for XML / BLOB cols
 -- ---------------------------------------------------------------------
 -- TODO: ALTER RECHTE für Tabellen prüfen, die nicht repliziert werden,
 -- aber CHILD in einer RI Beziehung sind, deren Parent repliziert wird
@@ -105,7 +107,7 @@ x.MTXT
 -- DEBUG
 -- , x.STATE
 -- , x.SUBNAME
-, x.target_owner
+-- , x.target_owner
 -- , x.target_name
 -- , x.colname
 
@@ -305,12 +307,12 @@ where coalesce(qc.target_colname , bqc.BEF_TARG_COLNAME) is null
 -- 19.10.2017
 -- FI Special  ---------------------------------
 -- remove or comment if project is not FI/IDH
-  and sc.name not in ('IDH_GLTG_FACH_ADTM',
-                      'IDH_GLTG_FACH_EDTM',
-					  'IDH_GLTG_TECH_ATS',
-					  'IDH_GLTG_TECH_ETS',
-					  'IDH_PRZS_ID_INS',
-					  'TRANS_START')
+--  and sc.name not in ('IDH_GLTG_FACH_ADTM',
+--                      'IDH_GLTG_FACH_EDTM',
+--					  'IDH_GLTG_TECH_ATS',
+--					  'IDH_GLTG_TECH_ETS',
+--					  'IDH_PRZS_ID_INS',
+--					  'TRANS_START')
 -- FI Special  ---------------------------------
 
 
@@ -911,6 +913,90 @@ and c1.bef_img_COLNAME       = c2.bef_img_COLNAME
 ) y
 
 where check is not null
+
+UNION
+-- Query 280:
+--    DE: Finde alle CCD Subscriptions mit einer BLOB oder XML 
+--    Spalte die in der Zieltabelle als NOT NULL definiert ist
+--    EN: Find all CCD subscriptions with a BLOB or XML column
+--    which is defined as NOT NULL in the target table
+
+select
+280 as ordercol,
+'ASNQAPP(' concat trim(current schema) concat ')' as program,
+current server as CURRENT_SERVER,
+'A-BXN' as MTYP,
+qt.subname,
+'ERROR' as SEV,
+
+-- DE
+-- 'QSUB ' concat trim(qt.subname) 
+-- concat ' (' concat qt.state concat ')'
+-- concat ' ist eine'
+-- concat case 
+--          when qt.ccd_condensed = 'Y' then ' condensed ' 
+-- 		 else ' non-condensed' 
+-- 	   end
+-- concat ' CCD Subscription. Die Zieltabelle enthält die '
+-- concat trim(sc.coltype) concat '-Spalte ' concat trim(sc.name) 
+-- concat ', die NOT NULL definiert ist. ' 
+-- concat case 
+--          when qt.ccd_condensed = 'Y' 
+--            then ' Dies kann im Rahmen eines Initial Loads zu'
+-- 		   concat ' Fehlern führen, wenn DELETE Log Records'
+-- 		   concat ' repliziert werden.'
+-- 		 else ' Dies ist nicht zulässig wenn DELETE Log Records '
+-- 		   concat 'repliziert werden sollen.' 
+-- 	   end
+--   as MTXT,
+
+
+-- EN
+'QSUB ' concat trim(qt.subname) 
+concat ' (' concat qt.state concat ')'
+concat ' is a'
+concat case 
+         when qt.ccd_condensed = 'Y' then ' condensed ' 
+		 else ' non-condensed' 
+	   end
+concat ' CCD subscription. The target table coltains '
+concat trim(sc.coltype) concat '-column ' concat trim(sc.name) 
+concat ', which is defined as NOT NULL. ' 
+concat case 
+         when qt.ccd_condensed = 'Y' 
+           then ' This can cause errors during initial load '
+		   concat ' in case DELETE log records have to be replicated'
+		   concat ' during the initial load.'
+		 else ' This is not valid in case DELETE log records '
+		   concat 'have to be replicated.' 
+	   end
+  as MTXT,
+
+
+'ALTER TABLE ' concat trim(sc.tbcreator) concat '.' 
+concat trim(sc.tbname) concat ' ALTER COLUMN ' 
+concat trim(sc.name)  concat ' DROP NOT NULL' as FIXIT,
+
+
+-- DEBUG
+qt.state,
+qt.target_owner, qt.target_name,
+substr(sc.tbcreator , 1 , 18) as tbcreator,
+substr(sc.tbname , 1 , 18) as tbname,
+substr(sc.name , 1 , 18) as COLNAME
+
+from ibmqrep_targets qt,
+     ibmqrep_trg_cols qc,
+     sysibm.syscolumns sc
+
+where qt.subname = qc.subname
+  and qt.recvq   = qc.recvq
+  and qt.TARGET_OWNER = sc.TBCREATOR
+  and qt.TARGET_NAME = sc.TBNAME
+  and qc.target_colname = sc.name
+  and qt.target_type = 2
+  and sc.coltype in ('XML', 'BLOB', 'CLOB')
+  and sc.nulls = 'N'
 
 
 ) x
