@@ -11,6 +11,7 @@
 --   261: A-RIC - Sub for RI child of a replicated RI parent missing
 --   270: A-BID - Before image column has different data type than
 --                after image column
+--   280: A-BXN - BLOB and XML target column nullability for CCD targets
 -- ---------------------------------------------------------------------
 -- Execute this query at the Q Apply server (e.g., after application
 -- release activities)
@@ -78,6 +79,7 @@
 --                image column NULLABILITY
 --  - 19.04.2018: Query 270 (Before images): FIXIT implemented for
 --                before image errors
+--  - 12.03.2021: New Query 280 - nullability check for XML / BLOB cols
 -- ---------------------------------------------------------------------
 -- TODO: ALTER RECHTE für Tabellen prüfen, die nicht repliziert werden,
 -- aber CHILD in einer RI Beziehung sind, deren Parent repliziert wird
@@ -105,7 +107,7 @@ x.MTXT
 -- DEBUG
 -- , x.STATE
 -- , x.SUBNAME
-, x.target_owner
+-- , x.target_owner
 -- , x.target_name
 -- , x.colname
 
@@ -894,6 +896,152 @@ and c1.bef_img_COLNAME       = c2.bef_img_COLNAME
 
 where check is not null
 
+
+UNION
+-- Query 220:
+--    DE: Finde alle Subscriptions, für die eine Spalte definiert ist,
+--    die nicht in DB2 existiert. Spalte wurde nach Anlegen der
+--    Subscription gelöscht oder umbenannt
+--    EN: Find all subscriptions which include a column which does not
+--    exist in DB2 (e.g., target column was removed / renamed after the
+--    subscription was defined)
+
+select
+220 as ordercol,
+'ASNQAPP(' concat trim(current schema) concat ')' as program,
+current server as CURRENT_SERVER,
+'A-CNF' as MTYP,
+qt.subname,
+'ERROR' as SEV,
+
+'QSUB ' concat trim(qt.subname) concat ' (' concat qt.state concat ')'
+
+-- DE
+concat ' enthaelt Ziel-Spalte '
+concat trim(qt.target_owner) concat '.' concat trim(qt.target_name)
+concat '.' concat trim(qc.TARGET_COLNAME)
+concat ' aber die Spalte existiert nicht in DB2!  '
+concat 'Die Subscription ist anzupassen.' as MTXT,
+
+-- EN
+-- concat ' contains target column '
+-- concat trim(qt.target_owner) concat '.' concat trim(qt.target_name)
+-- concat '.' concat trim(qc.TARGET_COLNAME)
+-- concat ' but the column does not exist in DB2!  '
+-- concat 'Modify the subscription.' as MTXT,
+
+'ALTER TABLE ' concat trim(qt.target_owner) concat '.'
+concat trim(qt.target_name) CONCAT ' ADD COLUMN '
+CONCAT trim(qc.TARGET_COLNAME) concat '<datatype>' as FIXIT,
+
+-- DEBUG
+qt.state,
+qt.target_owner, qt.target_name,
+substr(sc.tbcreator , 1 , 18) as tbcreator,
+substr(sc.tbname , 1 , 18) as tbname,
+substr(qc.TARGET_COLNAME , 1 , 18) as COLNAME
+
+from ibmqrep_targets qt
+inner join ibmqrep_trg_cols qc
+on  qt.SUBNAME = qc.SUBNAME
+and qt.RECVQ = qc.RECVQ
+
+-- check if source table exists (only column missing) to prevent
+-- report for the same as in query 1
+inner join sysibm.systables st
+on  qt.TARGET_OWNER = st.CREATOR
+and qt.TARGET_NAME  = st.NAME
+
+left outer join sysibm.syscolumns sc
+on  qt.TARGET_OWNER = sc.TBCREATOR
+and qt.TARGET_NAME  = sc.TBNAME
+and qc.TARGET_COLNAME  = sc.name
+
+where sc.name is null
+
+UNION
+-- Query 280:
+--    DE: Finde alle CCD Subscriptions mit einer BLOB oder XML 
+--    Spalte die in der Zieltabelle als NOT NULL definiert ist
+--    EN: Find all CCD subscriptions with a BLOB or XML column
+--    which is defined as NOT NULL in the target table
+
+select
+280 as ordercol,
+'ASNQAPP(' concat trim(current schema) concat ')' as program,
+current server as CURRENT_SERVER,
+'A-BXN' as MTYP,
+qt.subname,
+'ERROR' as SEV,
+
+-- DE
+'QSUB ' concat trim(qt.subname) 
+concat ' (' concat qt.state concat ')'
+concat ' ist eine'
+concat case 
+         when qt.ccd_condensed = 'Y' then ' condensed ' 
+		 else ' non-condensed' 
+	   end
+concat ' CCD Subscription. Die Zieltabelle enthält die '
+concat trim(sc.coltype) concat '-Spalte ' concat trim(sc.name) 
+concat ', die NOT NULL definiert ist. ' 
+concat case 
+         when qt.ccd_condensed = 'Y' 
+           then ' Dies kann im Rahmen eines Initial Loads zu'
+		   concat ' Fehlern führen, wenn DELETE Log Records'
+		   concat ' repliziert werden.'
+		 else ' Dies ist nicht zulässig wenn DELETE Log Records '
+		   concat 'repliziert werden sollen.' 
+	   end
+  as MTXT,
+
+
+-- EN
+-- 'QSUB ' concat trim(qt.subname) 
+-- concat ' (' concat qt.state concat ')'
+-- concat ' is a'
+-- concat case 
+--          when qt.ccd_condensed = 'Y' then ' condensed ' 
+-- 		 else ' non-condensed' 
+-- 	   end
+-- concat ' CCD subscription. The target table coltains '
+-- concat trim(sc.coltype) concat '-column ' concat trim(sc.name) 
+-- concat ', which is defined as NOT NULL. ' 
+-- concat case 
+--          when qt.ccd_condensed = 'Y' 
+--            then ' This can cause errors during initial load '
+-- 		   concat ' in case DELETE log records have to be replicated'
+-- 		   concat ' during the initial load.'
+-- 		 else ' This is not valid in case DELETE log records '
+-- 		   concat 'have to be replicated.' 
+-- 	   end
+--   as MTXT,
+
+
+'ALTER TABLE ' concat trim(sc.tbcreator) concat '.' 
+concat trim(sc.tbname) concat ' ALTER COLUMN ' 
+concat trim(sc.name)  concat ' DROP NOT NULL' as FIXIT,
+
+
+-- DEBUG
+qt.state,
+qt.target_owner, qt.target_name,
+substr(sc.tbcreator , 1 , 18) as tbcreator,
+substr(sc.tbname , 1 , 18) as tbname,
+substr(sc.name , 1 , 18) as COLNAME
+
+from ibmqrep_targets qt,
+     ibmqrep_trg_cols qc,
+     sysibm.syscolumns sc
+
+where qt.subname = qc.subname
+  and qt.recvq   = qc.recvq
+  and qt.TARGET_OWNER = sc.TBCREATOR
+  and qt.TARGET_NAME = sc.TBNAME
+  and qc.target_colname = sc.name
+  and qt.target_type = 2
+  and sc.coltype in ('XML', 'BLOB', 'CLOB')
+  and sc.nulls = 'N'
 
 ) x
 
