@@ -64,7 +64,7 @@
 
 -- uncomment the following line (CREATE VIEW) when using CREATE VIEW -
 -- comment when used as query
-create view QREP_MONITOR_CAPTURE as
+-- create view QREP_MONITOR_CAPTURE as
 
 
 select
@@ -554,8 +554,8 @@ on y1.sendq = y3.sendq
 
 -- comment the following 2 lines (order by / with ur) when
 -- using CREATE VIEW - uncomment when used as query
--- order by x.ordercol
--- with ur
+order by x.ordercol
+with ur
 ;
 
 -- set current schema = user;
