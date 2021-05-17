@@ -581,8 +581,9 @@ from
 select
 rq.recvq, coalesce(am.num_heartbeats, 0) as num_heartbeats,
 qmp.heartbeat_time_window
-from ibmqrep_recvqueues rq,
-     QREP_MON_APPLY_PARM qmp
+-- sequence of tables changed due to SQLCODE=-338 with Db2 z/OS
+from QREP_MON_APPLY_PARM qmp,
+     ibmqrep_recvqueues rq
 
 left outer join
 
