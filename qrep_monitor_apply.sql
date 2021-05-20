@@ -58,8 +58,12 @@
 --  - 13.01.2021: A-LAT Added detailed latencies "(E2E=x.ys, C=x.ys,
 --                A=x.ys, Q=x.ys)"
 --  - 13.01.2021: A-LAT Latency "cause" added (latency_cause)
---  - 15.01.2020: Control of thresholds (e.g. latency threshold) via
+--  - 15.01.2021: Control of thresholds (e.g. latency threshold) via
 --                parameters table QREP_MON_APPLY_PARM
+--  - 17.05.2021: Sequence of tables changed in query A-CHB due to 
+--                SQLCODE=-338 with Db2 z/OS
+--  - 20.05.2021: Added Q_PERCENT_FULL to A-RQU and A-LAT
+--  - 20.05.2021: ORDER BY changed from x.ordercol to x.ordercol, x.mtxt
 -- ---------------------------------------------------------------------
 -- TODO:
 -- ---------------------------------------------------------------------
@@ -215,6 +219,8 @@ when y.end2end_latency_sec > alat_thresh_error
 --        concat ' MB'
           concat ', QDEPTH='
           concat trim(VARCHAR(y.qdepth))
+          concat ' (' 
+		  concat trim(VARCHAR(y.q_percent_full)) concat '%)'
           concat ', ROWS_APPLIED='
           concat trim(VARCHAR(y.rows_applied))
 
@@ -266,6 +272,8 @@ when y.end2end_latency_sec > alat_thresh_warning
 --        concat ' MB'
           concat ', QDEPTH='
           concat trim(VARCHAR(y.qdepth))
+          concat ' (' 
+		  concat trim(VARCHAR(y.q_percent_full)) concat '%)'		  
           concat ', ROWS_APPLIED='
           concat trim(VARCHAR(y.rows_applied))
 -- DE
@@ -310,6 +318,8 @@ else 'Q Apply End2End Latenz ok (End2End Latency < '
 --        concat ' MB'
           concat ', QDEPTH='
           concat trim(VARCHAR(y.qdepth))
+          concat ' (' 
+		  concat trim(VARCHAR(y.q_percent_full)) concat '%)'		  
           concat ', ROWS_APPLIED='
           concat trim(VARCHAR(y.rows_applied))
 end as MTXT
@@ -328,6 +338,7 @@ dec(am.apply_latency / 1000, 12 , 1) as apply_latency_sec,
 dec(am.qlatency / 1000, 12 , 1) as qlatency_sec,
 am.rows_applied,
 am.qdepth,
+am.q_percent_full,
 qmp.alat_thresh_error,
 qmp.alat_thresh_warning,
 qmp.alat_cause_cap_qdepth,
@@ -385,6 +396,9 @@ case when y.state <> 'A'
           concat '/' concat trim(varchar(coalesce(z.num_subs_o , 0)))
           concat '). QDEPTH='
           concat coalesce(trim(VARCHAR(y.qdepth)) , 'UNKNOWN')
+          concat ' (' 		  
+		  concat coalesce(trim(VARCHAR(y.q_percent_full)) concat '%)',
+  		               'UNKNOWN')		  
           concat ' OLDEST_TRANS='
           CONCAT coalesce(trim(varchar(y.OLDEST_TRANS)) , 'UNKNOWN')
           concat ' MEMORY: '
@@ -412,6 +426,9 @@ case when y.state <> 'A'
           concat '/' concat trim(varchar(coalesce(z.num_subs_o , 0)))
           concat '). QDEPTH='
           concat coalesce(trim(VARCHAR(y.qdepth)) , 'UNKNOWN')
+          concat ' (' 
+		  concat coalesce(trim(VARCHAR(y.q_percent_full)) concat '%)',
+  		               'UNKNOWN')
           concat ' OLDEST_TRANS='
           CONCAT coalesce(trim(varchar(y.OLDEST_TRANS)) , 'UNKNOWN')
           concat ' MEMORY: '
@@ -427,7 +444,7 @@ from
 
 select
 rq.recvq, rq.state, rq.state_time,
-moni.OLDEST_TRANS, moni.qdepth,
+moni.OLDEST_TRANS, moni.qdepth, moni.q_percent_full,
 varchar(dec(dec(moni.CURRENT_MEMORY) / 1024 / 1024 , 5 , 0))
   as current_memory_mb,
 varchar(rq.memory_limit) as memory_limit
@@ -442,7 +459,8 @@ left outer join
 (
 
 select mon1.recvq, mon1.monitor_time,
-       mon2.OLDEST_TRANS, mon2.qdepth, mon2.CURRENT_MEMORY
+       mon2.OLDEST_TRANS, mon2.qdepth, mon2.q_percent_full, 
+	   mon2.CURRENT_MEMORY
 from
 
 (
@@ -738,7 +756,7 @@ where st.state <> 'A'
 
 ) x
 
-order by x.ordercol
+order by x.ordercol, x.mtxt
 
 with ur;
 
