@@ -2,8 +2,8 @@
 -- ---------------------------------------------------------------------
 -- Q Capture Monitor
 -- Report to quickly detect disruptions and exceptions for Q Capture
---
 -- Queries:
+--   000: C-VER - Capture Monitor version information
 --   100: C-OPE - Capture operational
 --   110: C-LAT - Capture latency
 --   130: C-SQU - Send Queue status
@@ -55,6 +55,9 @@
 --                leading 0. Example: 0.1 instead of .1
 --  - 15.01.2020: Control of thresholds (e.g. latency threshold) via
 --                parameters table QREP_MON_CAPTURE_PARM
+--  - 20.05.2021: ORDER BY changed from x.ordercol to x.ordercol, x.mtxt
+--  - 12.04.2022: C-VER added to visualize the version of the monitor 
+--                in the monitor's output
 -- ---------------------------------------------------------------------
 
 -- change before execution ---------------------------------------------
@@ -91,6 +94,24 @@ from
 -- ---------------------------------------------------------------------
 -- Q CAPTURE -----------------------------------------------------------
 
+-- Query 000:
+--    DE: Komponente: Q Capture
+--    Ausschnitt: Capture Monitor version
+--    EN: Component: Q Capture
+--    Section: Capture Monitor version
+
+select
+
+0 as ordercol,
+'ASNQCAP(' concat trim(current schema) concat ')' as program,
+current server as CURRENT_SERVER,
+'C-VER' as MTYP,
+'INFO'  as SEV,
+'Q Capture Monitor SQL Version 2.0 - 20220412' as MTXT
+
+FROM SYSIBM.SYSDUMMY1
+
+UNION
 
 -- Query 100:
 --    DE: Komponente: Q Capture
@@ -560,7 +581,7 @@ on y1.sendq = y3.sendq
 
 -- comment the following 2 lines (order by / with ur) when
 -- using CREATE VIEW - uncomment when used as query
-order by x.ordercol
+order by x.ordercol, x.mtxt
 with ur
 ;
 

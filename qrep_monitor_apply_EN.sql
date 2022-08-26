@@ -2,11 +2,13 @@
 -- ---------------------------------------------------------------------
 -- Q Apply Monitor
 -- Report to quickly detect disruptions and exceptions for Q Apply
---
 -- Queries:
---   210: A-LAT - Apply latency
---   230: A-RQU - Receive Queue status
---   235: A-EXC - Number of exceptions within the last 6 hours
+--   000: A-VER - Apply Monitor version information
+--   200: A-OPE - Apply operational
+--   210: A-RQU - Receive Queue status
+--   220: A-LAT - Apply latency
+--   232: A-CHB - Queue Heartbeat
+--   235: A-EXC - Number of exceptions within exception time window
 --   240: A-SUB - Inactive / new subscriptions
 -- ---------------------------------------------------------------------
 -- The report should be executed at the Q Apply server periodically
@@ -58,10 +60,20 @@
 --  - 13.01.2021: A-LAT Latency "cause" added (latency_cause)
 --  - 15.01.2021: Control of thresholds (e.g. latency threshold) via
 --                parameters table QREP_MON_APPLY_PARM
---  - 17.05.2021: Sequence of tables changed in query A-CHB due to 
+--  - 17.05.2021: Sequence of tables changed in query A-CHB due to
 --                SQLCODE=-338 with Db2 z/OS
 --  - 20.05.2021: Added Q_PERCENT_FULL to A-RQU and A-LAT
 --  - 20.05.2021: ORDER BY changed from x.ordercol to x.ordercol, x.mtxt
+--  - 23.06.2021: A-LAT when latency case is UNKNOWN, the severity 
+--                remains WARNING, even when end2end_latency eceeds 
+--                ALAT_THRESH_ERROR (to prevent alarms when latency 
+--                cause cannot be determined). Fine tuning with 
+--                ALAT_CAUSE_CAP_QDEPTH and ALAT_CAUSE_APP_QDEPTH
+--  - 12.04.2022: A-VER added to visualize the version of the monitor 
+--                in the monitor's output
+--  - 12.04.2022: A-RQU: Status ERROR when for this queue Apply stopped 
+--                the APPLYMON reporting (queue 'stale'), but Apply 
+--                continues to report progress for other queues
 -- ---------------------------------------------------------------------
 -- TODO:
 -- ---------------------------------------------------------------------
@@ -87,10 +99,27 @@ x.MTXT
 from
 
 (
-
-
 -- ---------------------------------------------------------------------
 -- Q APPLY -------------------------------------------------------------
+
+-- Query 000:
+--    DE: Komponente: Q Apply
+--    Ausschnitt: Apply Monitor version
+--    EN: Component: Q Apply
+--    Section: Apply Monitor version
+
+select
+
+0 as ordercol,
+'ASNQAPP(' concat trim(current schema) concat ')' as program,
+current server as CURRENT_SERVER,
+'A-VER' as MTYP,
+'INFO'  as SEV,
+'Q Apply Monitor SQL Version 2.0 - 20220412' as MTXT
+
+FROM SYSIBM.SYSDUMMY1
+
+UNION
 
 -- Query 200:
 --    DE: Komponente: Q Apply
@@ -161,6 +190,9 @@ current server as CURRENT_SERVER,
 'A-LAT' as MTYP,
 
 case when y.end2end_latency_sec > alat_thresh_error
+-- added 23.06.2021 begin
+      and latency_cause is not null
+-- added 23.06.2021	end
      then 'ERROR'
      when y.end2end_latency_sec > alat_thresh_warning
      then 'WARNING'
@@ -216,8 +248,8 @@ when y.end2end_latency_sec > alat_thresh_error
 --        concat ' MB'
           concat ', QDEPTH='
           concat trim(VARCHAR(y.qdepth))
-          concat ' (' 
-		  concat trim(VARCHAR(y.q_percent_full)) concat '%)'		  
+          concat ' ('
+          concat trim(VARCHAR(y.q_percent_full)) concat '%)'
           concat ', ROWS_APPLIED='
           concat trim(VARCHAR(y.rows_applied))
 
@@ -234,7 +266,7 @@ when y.end2end_latency_sec > alat_thresh_warning
           concat ' seconds for '
           concat trim(y.recvq)
           concat '. Probable cause: '
-          concat coalesce(y.latency_cause, 'UNKNOWN')		  
+          concat coalesce(y.latency_cause, 'UNKNOWN')
           concat ' (E2E='
           concat case
                     when y.end2end_latency_sec < 1 then
@@ -268,8 +300,8 @@ when y.end2end_latency_sec > alat_thresh_warning
 --        concat ' MB'
           concat ', QDEPTH='
           concat trim(VARCHAR(y.qdepth))
-          concat ' (' 
-		  concat trim(VARCHAR(y.q_percent_full)) concat '%)'		  
+          concat ' ('
+          concat trim(VARCHAR(y.q_percent_full)) concat '%)'
           concat ', ROWS_APPLIED='
           concat trim(VARCHAR(y.rows_applied))
 
@@ -315,8 +347,8 @@ when y.end2end_latency_sec > alat_thresh_warning
 --        concat ' MB'
           concat ', QDEPTH='
           concat trim(VARCHAR(y.qdepth))
-          concat ' (' 
-		  concat trim(VARCHAR(y.q_percent_full)) concat '%)'		  
+          concat ' ('
+          concat trim(VARCHAR(y.q_percent_full)) concat '%)'
           concat ', ROWS_APPLIED='
           concat trim(VARCHAR(y.rows_applied))
 end as MTXT
@@ -376,6 +408,12 @@ current server as CURRENT_SERVER,
 'A-RQU' as MTYP,
 case when y.state <> 'A'
      then 'ERROR'
+-- stale means: Apply is running (A-OPE is ok), but for this 
+-- particular queue no more APPLYMON records are written. Might
+-- happen due to Db2 out of memory problem, when even setting
+-- RECVQUEUES.STATE = 'I' fails
+  	 when y.queue_stale is not NULL
+  	 then 'ERROR'
      else 'INFO'
 end as SEV,
 
@@ -393,7 +431,7 @@ case when y.state <> 'A'
           concat '/' concat trim(varchar(coalesce(z.num_subs_o , 0)))
           concat '). QDEPTH='
           concat coalesce(trim(VARCHAR(y.qdepth)) , 'UNKNOWN')
-          concat ' (' 
+          concat ' (' 		  
 		  concat coalesce(trim(VARCHAR(y.q_percent_full)) concat '%)',
   		               'UNKNOWN')		  
           concat ' OLDEST_TRANS='
@@ -414,9 +452,17 @@ case when y.state <> 'A'
 
      else 'Receive Queue ' concat trim(y.RECVQ)
 -- DE
---        concat ' aktiv'
+--       concat
+--       case when y.queue_stale is null
+--            then ' aktiv'
+-- 		   else ' aktiv, aber kein APPLYMON Fortschritt (stale)'
+-- 	  end
 -- EN
-          concat ' active'
+          concat
+          case when y.queue_stale is null
+               then ' active'
+  			   else ' active, but no progress in APPLYMON (stale)'
+  		  end
           concat ' (#subs A/I/O: '
           concat trim(varchar(coalesce(z.num_subs_a , 0)))
           concat '/' concat trim(varchar(coalesce(z.num_subs_i , 0)))
@@ -425,7 +471,7 @@ case when y.state <> 'A'
           concat coalesce(trim(VARCHAR(y.qdepth)) , 'UNKNOWN')
           concat ' (' 
 		  concat coalesce(trim(VARCHAR(y.q_percent_full)) concat '%)',
-  		               'UNKNOWN')		  
+  		               'UNKNOWN')
           concat ' OLDEST_TRANS='
           CONCAT coalesce(trim(varchar(y.OLDEST_TRANS)) , 'UNKNOWN')
           concat ' MEMORY: '
@@ -444,7 +490,8 @@ rq.recvq, rq.state, rq.state_time,
 moni.OLDEST_TRANS, moni.qdepth, moni.q_percent_full,
 varchar(dec(dec(moni.CURRENT_MEMORY) / 1024 / 1024 , 5 , 0))
   as current_memory_mb,
-varchar(rq.memory_limit) as memory_limit
+varchar(rq.memory_limit) as memory_limit,
+moni.monitor_time, moni.queue_stale
 
 from
 
@@ -455,19 +502,56 @@ left outer join
 -- Most recent monitor data
 (
 
-select mon1.recvq, mon1.monitor_time,
+select mon1.recvq, mon1.monitor_time, 
+       mon1.expected_ts_last_monitor_record,
+	   case 
+	     when (mon1.monitor_time <
+               mon1.EXPECTED_TS_LAST_MONITOR_RECORD - 5 seconds
+			   AND
+			   mon1.max_monitor_time_global >= 
+			   mon1.EXPECTED_TS_LAST_MONITOR_RECORD - 5 seconds
+			  )
+         then 1
+         else null
+	   end as queue_stale,
        mon2.OLDEST_TRANS, mon2.qdepth, mon2.q_percent_full, 
 	   mon2.CURRENT_MEMORY
 from
 
 (
 
-select recvq, max(monitor_time) as monitor_time
+select recvq, monitor_time, EXPECTED_TS_LAST_MONITOR_RECORD, 
+       max_monitor_time_global
+from
+
+(
+-- highest MONITOR_TIME per queue
+select recvq, max(monitor_time) as monitor_time,
+current timestamp - (dec(ap.monitor_interval) / 1000) seconds
+   AS EXPECTED_TS_LAST_MONITOR_RECORD
+  
+from ibmqrep_applymon am,
+     ibmqrep_applyparms ap
+     
+group by recvq, 
+         current timestamp - (dec(ap.monitor_interval) / 1000) seconds
+
+) qmon
+
+inner join 
+
+(
+-- joined with highest MONITOR_TIME over all (all queues)
+select max(monitor_time) as max_monitor_time_global
 from ibmqrep_applymon
-group by recvq
+
+) maxmon
+
+on 1=1
 
 ) mon1
 
+-- get APPLYMON details for highest MONITOR_TIME
 inner join ibmqrep_applymon mon2
 
 on  mon1.recvq = mon2.recvq
