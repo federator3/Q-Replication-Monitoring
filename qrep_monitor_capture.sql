@@ -59,6 +59,13 @@
 --  - 20.05.2021: ORDER BY changed from x.ordercol to x.ordercol, x.mtxt
 --  - 12.04.2022: C-VER added to visualize the version of the monitor 
 --                in the monitor's output
+--  - 04.01.2023: OPE-threshold changed from 5 to 20 seconds
+--  - 21.12.2023: Message C-SQU (Q130): For z/OS Capture servers the 
+--                time difference between RESTART_SEQ and 
+--                RESTART_MAXCMTSEQ can be added to C-SQU. WARNING > 2
+--                hours and ERROR > 5 hours. Needs to be activated by
+--                uncommenting the indicated code in section 130. 
+--                z/OS version commented as not compatible with Db2 LUW
 -- ---------------------------------------------------------------------
 
 -- change before execution ---------------------------------------------
@@ -95,6 +102,7 @@ from
 -- ---------------------------------------------------------------------
 -- Q CAPTURE -----------------------------------------------------------
 
+-- ---------------------------------------------------------------------
 -- Query 000:
 --    DE: Komponente: Q Capture
 --    Ausschnitt: Capture Monitor version
@@ -108,7 +116,7 @@ select
 current server as CURRENT_SERVER,
 'C-VER' as MTYP,
 'INFO'  as SEV,
-'Q Capture Monitor SQL Version 2.0 - 20220412' as MTXT
+'Q Capture Monitor SQL Version 2.1 - 20231222' as MTXT
 
 FROM SYSIBM.SYSDUMMY1
 
@@ -129,14 +137,17 @@ select
 current server as CURRENT_SERVER,
 'C-OPE' as MTYP,
 
+-- Threshold (hard coded) changed from 5 to 20 seconds to prevent 
+-- false alarms in case of short delays
+
 case when y.MONITOR_TIME <
-       y.EXPECTED_TS_LAST_MONITOR_RECORD - 5 seconds
+       y.EXPECTED_TS_LAST_MONITOR_RECORD - 20 seconds
      then 'ERROR'
      else 'INFO'
 end as SEV,
 
 case when y.MONITOR_TIME <
-       y.EXPECTED_TS_LAST_MONITOR_RECORD - 5 seconds
+       y.EXPECTED_TS_LAST_MONITOR_RECORD - 20 seconds
 -- DE
        then 'Q Capture nicht in Betrieb oder gestoert seit '
           concat trim(VARCHAR(y.MONITOR_TIME)) concat '.'
@@ -171,9 +182,9 @@ UNION
 
 -- ---------------------------------------------------------------------
 -- Query 110:
---    DE: Komponente: Q Captuure
+--    DE: Komponente: Q Capture
 --    Ausschnitt: Capture Latency
---    EM: Component: Q Capture
+--    EN: Component: Q Capture
 --    Section: Capture Latency
 
 select
@@ -182,22 +193,22 @@ select
 current server as CURRENT_SERVER,
 'C-LAT' as MTYP,
 
-case when y.CAPTURE_LATENCY_SEC > clat_thresh_error
+case when y.CAPTURE_LATENCY_SEC > y.clat_thresh_error
      then 'ERROR'
-     when y.CAPTURE_LATENCY_SEC > clat_thresh_warning
+     when y.CAPTURE_LATENCY_SEC > y.clat_thresh_warning
      then 'WARNING'
      else 'INFO'
 end as SEV,
 
-case when y.CAPTURE_LATENCY_SEC > clat_thresh_error
+case when y.CAPTURE_LATENCY_SEC > y.clat_thresh_error
 -- DE
      then 'Q Capture Latenz > '
-             concat trim(varchar(clat_thresh_error))
+             concat trim(varchar(y.clat_thresh_error))
              concat ' Sekunden. CAPTURE_LATENCY='
 
 -- EN
 --     then 'Q Capture latency > '
---           concat trim(varchar(clat_thresh_error))
+--           concat trim(varchar(y.clat_thresh_error))
 --           concat ' seconds. CAPTURE_LATENCY='
 
           concat trim(VARCHAR(y.CAPTURE_LATENCY_SEC))
@@ -209,15 +220,15 @@ case when y.CAPTURE_LATENCY_SEC > clat_thresh_error
           concat trim(VARCHAR(y.TRANS_SPILLED)) concat '.'
 
 
-     when y.CAPTURE_LATENCY_SEC > clat_thresh_warning
+     when y.CAPTURE_LATENCY_SEC > y.clat_thresh_warning
 -- DE
      then 'Q Capture Latenz > '
-             concat trim(varchar(clat_thresh_warning))
+             concat trim(varchar(y.clat_thresh_warning))
              concat ' Sekunden. CAPTURE_LATENCY='
 
 -- EN
 --     then 'Q Capture latency > '
---           concat trim(varchar(clat_thresh_warning))
+--           concat trim(varchar(y.clat_thresh_warning))
 --           concat ' seconds. CAPTURE_LATENCY='
 
           concat trim(VARCHAR(y.CAPTURE_LATENCY_SEC))
@@ -230,11 +241,11 @@ case when y.CAPTURE_LATENCY_SEC > clat_thresh_error
 
 -- DE
      else 'Q Capture Latenz ok (Cature Latency < '
-           concat trim(varchar(clat_thresh_warning))
+           concat trim(varchar(y.clat_thresh_warning))
            concat 's). '
 -- EN
 --     else 'Q Capture latency ok (Cature Latency < '
---           concat trim(varchar(clat_thresh_warning))
+--           concat trim(varchar(y.clat_thresh_warning))
 --           concat 's). '
 
           concat 'CAPTURE_LATENCY=' concat
@@ -265,9 +276,9 @@ qmp.clat_thresh_warning,
 qmp.clat_thresh_error,
 
 -- 09.12.2020: new logic to calculate the capture latency using
--- TIMESTAMPDIFF(2, ...) which calculates the differnce in seconds.
+-- TIMESTAMPDIFF(2, ...) which calculates the difference in seconds.
 -- Explicitly, TIMESTAMPDIFF(1, ...) - microseconds - was not used
--- to prevent overflows. Instead, the difference in microseconds ist
+-- to prevent overflows. Instead, the difference in microseconds is
 -- added to the difference in seconds to get a more precise latency
 -- value and preventing overflows. Max. difference without overflow:
 -- 68 years (due to integer limits)
@@ -319,6 +330,7 @@ where cm.monitor_time = (select max(monitor_time)
 
 UNION
 
+-- ---------------------------------------------------------------------
 -- Query 130:
 --    DE: Komponente: Q Capture
 --    Ausschnitt: Send Queue Status
@@ -326,48 +338,79 @@ UNION
 --    Section: Send Queue Status
 
 select
+
+-- y.RESTART_SEQ_TS_LOCAL,
+-- y.RESTART_MAXCMTSEQ_TS_LOCAL,
+-- y.RESTART_2_CMT_SEQ_MINUTES, 
+
+
 130 as ordercol,
 'ASNQCAP(' concat trim(current schema) concat ')' as program,
 current server as CURRENT_SERVER,
 'C-SQU' as MTYP,
 case when y.state <> 'A'
-     then 'ERROR'
+       then 'ERROR'
+     when y.RESTART_2_CMT_SEQ_MINUTES > 300
+       then 'ERROR'    
+     when y.RESTART_2_CMT_SEQ_MINUTES > 120
+       then 'WARNING'          
      else 'INFO'
 end as SEV,
 
-case when y.state <> 'A'
+'Send Queue ' concat trim(y.SENDQ)
 
-     then 'Send Queue ' concat trim(y.SENDQ)
-
+concat case 
+         when y.state <> 'A'
+           then 
 -- DE
-          concat ' inaktiv (STATE=' concat y.state concat ') seit '
+                 ' inaktiv (STATE=' concat y.state concat ') seit '
 -- EN
---        concat ' inactive (STATE=' concat y.state concat ') since '
-
-          concat trim(varchar(y.STATE_TIME))
-          concat ' (#subs A/I/N/O: '
-          concat trim(varchar(coalesce(z.num_subs_a , 0)))
-          concat '/' concat trim(varchar(coalesce(z.num_subs_i , 0)))
-          concat '/' concat trim(varchar(coalesce(z.num_subs_n , 0)))
-          concat '/' concat trim(varchar(coalesce(z.num_subs_o , 0)))
-          concat '). XMITQDEPTH=' concat trim(VARCHAR(y.XMITQDEPTH))
-          concat '.'
-
-     else 'Send Queue ' concat trim(y.SENDQ)
-
--- DE
-          concat ' aktiv.'
+--               ' inactive (STATE=' concat y.state concat ') since '
+           else 
+-- DE          
+                 ' aktiv.'
 -- EN
---        concat ' active.'
+--               ' active.'
+         end 
 
-          concat ' (#subs A/I/N/O: '
-          concat trim(varchar(coalesce(z.num_subs_a , 0)))
-          concat '/' concat trim(varchar(coalesce(z.num_subs_i , 0)))
-          concat '/' concat trim(varchar(coalesce(z.num_subs_n , 0)))
-          concat '/' concat trim(varchar(coalesce(z.num_subs_o , 0)))
-          concat '). XMITQDEPTH=' concat trim(VARCHAR(y.XMITQDEPTH))
-          concat '.'
-end as MTXT
+concat trim(varchar(y.STATE_TIME))
+concat ' (#subs A/I/N/O: '
+concat trim(varchar(coalesce(z.num_subs_a , 0)))
+concat '/' concat trim(varchar(coalesce(z.num_subs_i , 0)))
+concat '/' concat trim(varchar(coalesce(z.num_subs_n , 0)))
+concat '/' concat trim(varchar(coalesce(z.num_subs_o , 0)))
+concat '). XMITQDEPTH=' concat trim(VARCHAR(y.XMITQDEPTH))
+concat '.'
+
+concat case 
+         when y.RESTART_2_CMT_SEQ_MINUTES > 300
+           then 
+-- DE          
+                coalesce('!!! Zeitunterschied zw. RESTART_SEQ und '
+                             concat 'RESTART_MAXCMTSEQ > 5 Stunden: ' 
+                             concat trim(CHAR(RESTART_2_CMT_SEQ_MINUTES) )
+                             concat ' Minuten.'   , ' ')
+-- EN
+--              coalesce('!!! Time difference btwn. RESTART_SEQ and '
+--                           concat 'RESTART_MAXCMTSEQ > 5 hours: ' 
+--                           concat trim(CHAR(RESTART_2_CMT_SEQ_MINUTES) )
+--                           concat ' minutes.'  , ' ')             
+         when y.RESTART_2_CMT_SEQ_MINUTES > 120
+           then 
+-- DE          
+                coalesce('! Zeitunterschied zw. RESTART_SEQ und '
+                             concat 'RESTART_MAXCMTSEQ > 2 Stunden: ' 
+                             concat trim(CHAR(RESTART_2_CMT_SEQ_MINUTES))
+                             concat ' Minuten.'  , ' ')
+-- EN
+--              coalesce('! Time difference btwn. RESTART_SEQ and '
+--                           concat 'RESTART_MAXCMTSEQ > 2 hours: ' 
+--                           concat trim(CHAR(RESTART_2_CMT_SEQ_MINUTES) )
+--                           concat ' minutes.' , ' ')              
+         else ' '
+       end
+
+as MTXT
 
 from
 
@@ -376,6 +419,30 @@ from
 select
 sq.sendq, sq.state, sq.state_time,
 cqm.XMITQDEPTH
+
+-- --------------------------------------------------------------
+-- BEGIN: z/OS Capture server only, comment LUW or z/OS section
+-- --------------------------------------------------------------
+
+-- LUW -- remove comments of the following 3 lines when LUW
+, CAST (NULL AS TIMESTAMP) AS RESTART_MAXCMTSEQ_TS_LOCAL
+, CAST (NULL AS TIMESTAMP) AS RESTART_SEQ_TS_LOCAL
+, CAST (NULL AS INT) AS RESTART_2_CMT_SEQ_MINUTES
+
+
+-- z/OS -- remove comments of the following lines when z/OS
+-- , TIMESTAMP(CAST (RESTART_SEQ AS VARBINARY(16))) 
+--     + CURRENT TIMEZONE AS RESTART_SEQ_TS_LOCAL
+-- , TIMESTAMP(CAST (RESTART_MAXCMTSEQ AS VARBINARY(16))) 
+--     + CURRENT TIMEZONE AS RESTART_MAXCMTSEQ_TS_LOCAL   
+-- , TIMESTAMPDIFF(4, 
+--          CHAR(TIMESTAMP(CAST (RESTART_MAXCMTSEQ AS VARBINARY(16))) 
+--             - TIMESTAMP(CAST (RESTART_SEQ AS VARBINARY(16))))) 
+--     AS RESTART_2_CMT_SEQ_MINUTES 
+
+-- --------------------------------------------------------------
+-- END:   z/OS Capture server only, comment LUW or z/OS section
+-- --------------------------------------------------------------
 
 from
 
@@ -440,10 +507,11 @@ on y.sendq = z.sendq
 
 UNION
 
+-- ---------------------------------------------------------------------
 -- Query 140:
 --    DE: Komponente: Q Capture
 --    Ausschnitt: Subscription Status
---    DE: Component: Q Capture
+--    EN: Component: Q Capture
 --    Section: Subscription state
 
 select
